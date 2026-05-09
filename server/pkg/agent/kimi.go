@@ -302,14 +302,14 @@ func (b *kimiBackend) Execute(ctx context.Context, prompt string, opts ExecOptio
 		finalOutput := output.String()
 		outputMu.Unlock()
 
-		// If kimi produced no visible output but we sniffed a
-		// provider-level error on stderr (typically HTTP 4xx from
-		// api.kimi.com — token expired, rate-limited, upstream
-		// 5xx, …), promote the status to failed and surface the
-		// real reason. Without this the daemon reports a cryptic
-		// "completed + empty output" and the actionable error
-		// stays buried in daemon logs.
-		if finalStatus == "completed" && finalOutput == "" {
+		// If we sniffed a provider-level error on stderr (typically
+		// HTTP 4xx from api.kimi.com — token expired, rate-limited,
+		// upstream 5xx, …), promote the status to failed and surface
+		// the real reason. The adapter may also inject the failure
+		// as a synthetic agent text turn ("API call failed after N
+		// retries..."), so the output buffer is not always empty —
+		// we trust the sniffer's regex and promote regardless.
+		if finalStatus == "completed" {
 			if msg := providerErr.message(); msg != "" {
 				finalStatus = "failed"
 				finalError = msg

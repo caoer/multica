@@ -297,7 +297,12 @@ func (b *kiroBackend) Execute(ctx context.Context, prompt string, opts ExecOptio
 		finalOutput := output.String()
 		outputMu.Unlock()
 
-		if finalStatus == "completed" && finalOutput == "" {
+		// If we sniffed a provider-level error on stderr, promote the
+		// status to failed regardless of whether the agent stream also
+		// surfaced the error as text. The sniffer's regex is specific
+		// enough (HTTP 4xx markers, named error types) that we trust
+		// it as a definitive signal that the upstream call failed.
+		if finalStatus == "completed" {
 			if msg := providerErr.message(); msg != "" {
 				finalStatus = "failed"
 				finalError = msg

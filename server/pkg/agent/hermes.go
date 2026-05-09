@@ -312,14 +312,17 @@ func (b *hermesBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		finalOutput := output.String()
 		outputMu.Unlock()
 
-		// If hermes produced no visible output but we sniffed a
-		// provider-level error on stderr (typically HTTP 4xx from
-		// the configured LLM endpoint), promote the status to
-		// failed and surface the real reason. Without this the
-		// daemon reports a cryptic "hermes returned empty output"
-		// and the actionable error (e.g. "model X not supported
-		// with your ChatGPT account") stays buried in daemon logs.
-		if finalStatus == "completed" && finalOutput == "" {
+		// If we sniffed a provider-level error on stderr (typically
+		// HTTP 4xx from the configured LLM endpoint, including 429
+		// rate-limit / no-credit), promote the status to failed and
+		// surface the real reason. Hermes reports stopReason=end_turn
+		// even when the upstream call ultimately fails, and depending
+		// on the adapter the error may also leak into the agent text
+		// stream (a synthetic "API call failed after N retries..."
+		// turn) — so the output buffer is not always empty. We trust
+		// the sniffer's regex (specific error-type tags + HTTP status
+		// markers) and promote regardless of whether output is empty.
+		if finalStatus == "completed" {
 			if msg := providerErr.message(); msg != "" {
 				finalStatus = "failed"
 				finalError = msg
