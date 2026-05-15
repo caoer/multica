@@ -139,6 +139,7 @@ func (s *AutopilotService) dispatchCreateIssue(ctx context.Context, ap db.Autopi
 		CreatorID:     ap.CreatedByID,
 		ParentIssueID: pgtype.UUID{},
 		Position:      0,
+		StartDate:     pgtype.Timestamptz{},
 		DueDate:       pgtype.Timestamptz{},
 		Number:        issueNumber,
 		ProjectID:     pgtype.UUID{},

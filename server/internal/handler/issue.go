@@ -41,6 +41,7 @@ type IssueResponse struct {
 	ParentIssueID      *string                 `json:"parent_issue_id"`
 	ProjectID          *string                 `json:"project_id"`
 	Position           float64                 `json:"position"`
+	StartDate          *string                 `json:"start_date"`
 	DueDate            *string                 `json:"due_date"`
 	CreatedAt          string                  `json:"created_at"`
 	UpdatedAt          string                  `json:"updated_at"`
@@ -73,6 +74,7 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
 		Position:      i.Position,
+		StartDate:     timestampToPtr(i.StartDate),
 		DueDate:       timestampToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
 		UpdatedAt:     timestampToString(i.UpdatedAt),
@@ -98,6 +100,7 @@ func issueListRowToResponse(i db.ListIssuesRow, issuePrefix string) IssueRespons
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
 		Position:      i.Position,
+		StartDate:     timestampToPtr(i.StartDate),
 		DueDate:       timestampToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
 		UpdatedAt:     timestampToString(i.UpdatedAt),
@@ -153,6 +156,7 @@ func openIssueRowToResponse(i db.ListOpenIssuesRow, issuePrefix string) IssueRes
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
 		ProjectID:     uuidToPtr(i.ProjectID),
 		Position:      i.Position,
+		StartDate:     timestampToPtr(i.StartDate),
 		DueDate:       timestampToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
 		UpdatedAt:     timestampToString(i.UpdatedAt),
@@ -465,7 +469,7 @@ func buildSearchQuery(phrase string, terms []string, queryNum int, hasNum bool, 
 	query := fmt.Sprintf(`SELECT i.id, i.workspace_id, i.title, i.description, i.status, i.priority,
 		i.assignee_type, i.assignee_id, i.creator_type, i.creator_id,
 		i.parent_issue_id, i.acceptance_criteria, i.context_refs, i.position,
-		i.due_date, i.created_at, i.updated_at, i.number, i.project_id,
+		i.start_date, i.due_date, i.created_at, i.updated_at, i.number, i.project_id,
 		COUNT(*) OVER() AS total_count,
 		%s AS match_source,
 		%s AS matched_comment_content
@@ -553,6 +557,7 @@ func (h *Handler) SearchIssues(w http.ResponseWriter, r *http.Request) {
 			&sr.issue.AcceptanceCriteria,
 			&sr.issue.ContextRefs,
 			&sr.issue.Position,
+			&sr.issue.StartDate,
 			&sr.issue.DueDate,
 			&sr.issue.CreatedAt,
 			&sr.issue.UpdatedAt,
@@ -1126,6 +1131,7 @@ type CreateIssueRequest struct {
 	AssigneeID         *string  `json:"assignee_id"`
 	ParentIssueID      *string  `json:"parent_issue_id"`
 	ProjectID          *string  `json:"project_id"`
+	StartDate          *string  `json:"start_date"`
 	DueDate            *string  `json:"due_date"`
 	AttachmentIDs      []string `json:"attachment_ids,omitempty"`
 	// OriginType / OriginID stamp the new issue with its provenance so
@@ -1222,6 +1228,16 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var startDate pgtype.Timestamptz
+	if req.StartDate != nil && *req.StartDate != "" {
+		t, err := time.Parse(time.RFC3339, *req.StartDate)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid start_date format, expected RFC3339")
+			return
+		}
+		startDate = pgtype.Timestamptz{Time: t, Valid: true}
+	}
+
 	var dueDate pgtype.Timestamptz
 	if req.DueDate != nil && *req.DueDate != "" {
 		t, err := time.Parse(time.RFC3339, *req.DueDate)
@@ -1292,6 +1308,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 			CreatorID:     parseUUID(actualCreatorID),
 			ParentIssueID: parentIssueID,
 			Position:      0,
+			StartDate:     startDate,
 			DueDate:       dueDate,
 			Number:        issueNumber,
 			ProjectID:     projectID,
@@ -1311,6 +1328,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 			CreatorID:     parseUUID(actualCreatorID),
 			ParentIssueID: parentIssueID,
 			Position:      0,
+			StartDate:     startDate,
 			DueDate:       dueDate,
 			Number:        issueNumber,
 			ProjectID:     projectID,
@@ -1413,6 +1431,7 @@ type UpdateIssueRequest struct {
 	AssigneeType       *string  `json:"assignee_type"`
 	AssigneeID         *string  `json:"assignee_id"`
 	Position           *float64 `json:"position"`
+	StartDate          *string  `json:"start_date"`
 	DueDate            *string  `json:"due_date"`
 	ParentIssueID      *string  `json:"parent_issue_id"`
 	ProjectID          *string  `json:"project_id"`
@@ -1454,6 +1473,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		ID:            prevIssue.ID,
 		AssigneeType:  prevIssue.AssigneeType,
 		AssigneeID:    prevIssue.AssigneeID,
+		StartDate:     prevIssue.StartDate,
 		DueDate:       prevIssue.DueDate,
 		ParentIssueID: prevIssue.ParentIssueID,
 		ProjectID:     prevIssue.ProjectID,
@@ -1492,6 +1512,18 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 			params.AssigneeID = id
 		} else {
 			params.AssigneeID = pgtype.UUID{Valid: false} // explicit null = unassign
+		}
+	}
+	if _, ok := rawFields["start_date"]; ok {
+		if req.StartDate != nil && *req.StartDate != "" {
+			t, err := time.Parse(time.RFC3339, *req.StartDate)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid start_date format, expected RFC3339")
+				return
+			}
+			params.StartDate = pgtype.Timestamptz{Time: t, Valid: true}
+		} else {
+			params.StartDate = pgtype.Timestamptz{Valid: false} // explicit null = clear date
 		}
 	}
 	if _, ok := rawFields["due_date"]; ok {
@@ -1595,6 +1627,9 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	priorityChanged := req.Priority != nil && prevIssue.Priority != issue.Priority
 	descriptionChanged := req.Description != nil && textToPtr(prevIssue.Description) != resp.Description
 	titleChanged := req.Title != nil && prevIssue.Title != issue.Title
+	prevStartDate := timestampToPtr(prevIssue.StartDate)
+	startDateChanged := prevStartDate != resp.StartDate && (prevStartDate == nil) != (resp.StartDate == nil) ||
+		(prevStartDate != nil && resp.StartDate != nil && *prevStartDate != *resp.StartDate)
 	prevDueDate := timestampToPtr(prevIssue.DueDate)
 	dueDateChanged := prevDueDate != resp.DueDate && (prevDueDate == nil) != (resp.DueDate == nil) ||
 		(prevDueDate != nil && resp.DueDate != nil && *prevDueDate != *resp.DueDate)
@@ -1607,6 +1642,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		"assignee_changed":    assigneeChanged,
 		"status_changed":      statusChanged,
 		"priority_changed":    priorityChanged,
+		"start_date_changed":  startDateChanged,
 		"due_date_changed":    dueDateChanged,
 		"description_changed": descriptionChanged,
 		"title_changed":       titleChanged,
@@ -1615,6 +1651,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		"prev_assignee_id":    uuidToPtr(prevIssue.AssigneeID),
 		"prev_status":         prevIssue.Status,
 		"prev_priority":       prevIssue.Priority,
+		"prev_start_date":     prevStartDate,
 		"prev_due_date":       prevDueDate,
 		"prev_description":    textToPtr(prevIssue.Description),
 		"creator_type":        prevIssue.CreatorType,
@@ -1862,7 +1899,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 		req.Updates.Priority != nil ||
 		req.Updates.Position != nil
 	if !hasMutation {
-		for _, k := range []string{"assignee_type", "assignee_id", "due_date", "parent_issue_id", "project_id"} {
+		for _, k := range []string{"assignee_type", "assignee_id", "start_date", "due_date", "parent_issue_id", "project_id"} {
 			if _, ok := rawUpdates[k]; ok {
 				hasMutation = true
 				break
@@ -1897,6 +1934,7 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 			ID:            prevIssue.ID,
 			AssigneeType:  prevIssue.AssigneeType,
 			AssigneeID:    prevIssue.AssigneeID,
+			StartDate:     prevIssue.StartDate,
 			DueDate:       prevIssue.DueDate,
 			ParentIssueID: prevIssue.ParentIssueID,
 			ProjectID:     prevIssue.ProjectID,
@@ -1933,6 +1971,17 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 				params.AssigneeID = assigneeUUID
 			} else {
 				params.AssigneeID = pgtype.UUID{Valid: false}
+			}
+		}
+		if _, ok := rawUpdates["start_date"]; ok {
+			if req.Updates.StartDate != nil && *req.Updates.StartDate != "" {
+				t, err := time.Parse(time.RFC3339, *req.Updates.StartDate)
+				if err != nil {
+					continue
+				}
+				params.StartDate = pgtype.Timestamptz{Time: t, Valid: true}
+			} else {
+				params.StartDate = pgtype.Timestamptz{Valid: false}
 			}
 		}
 		if _, ok := rawUpdates["due_date"]; ok {
