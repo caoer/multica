@@ -869,6 +869,12 @@ export class ApiClient {
     );
   }
 
+  async deleteCloudRuntimeNode(nodeId: string): Promise<void> {
+    await this.fetch(`/api/cloud-runtime/nodes/${nodeId}`, {
+      method: "DELETE",
+    });
+  }
+
   async deleteRuntime(runtimeId: string): Promise<void> {
     await this.fetch(`/api/runtimes/${runtimeId}`, { method: "DELETE" });
   }
