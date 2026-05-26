@@ -2243,13 +2243,15 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 	// acts as a parking lot — moving to an active status signals the issue is
 	// ready for work. Agent actors are allowed here so the documented
 	// serial sub-task workflow works (parent agent finishes Step 1, then
-	// promotes Step 2 from backlog→todo for a different child agent). The
-	// only excluded case is an agent promoting an issue assigned to itself,
-	// which would self-loop on every run; uuidToString returns "" for an
-	// unset assignee, so an unassigned issue can never accidentally match.
+	// promotes Step 2 from backlog→todo, regardless of who Step 2 is
+	// assigned to). The only excluded case is the real self-loop: an agent
+	// promoting the same issue its current task is running on. Same-agent,
+	// cross-issue handoff (Agent A finishing one task and promoting another
+	// issue assigned to A) must still fire — that is the documented serial
+	// chain.
 	if statusChanged && !assigneeChanged &&
 		prevIssue.Status == "backlog" && issue.Status != "done" && issue.Status != "cancelled" &&
-		!isAgentSelfPromotion(actorType, actorID, issue) {
+		!h.isAgentRunningOnIssue(r, actorType, issue) {
 		if h.isAgentAssigneeReady(r.Context(), issue) {
 			h.TaskService.EnqueueTaskForIssue(r.Context(), issue)
 		}
@@ -2379,20 +2381,41 @@ func (h *Handler) shouldEnqueueOnComment(ctx context.Context, issue db.Issue) bo
 	return true
 }
 
-// isAgentSelfPromotion reports whether the actor is an agent promoting an
-// issue assigned to itself. This is the one case the backlog→active
-// transition must skip to avoid an infinite self-trigger loop: an agent
-// flipping its own backlog issue to todo would immediately re-enqueue
-// itself, complete its run, flip again, and so on. Cross-agent and
-// member-driven promotions are fine and must still fire.
-func isAgentSelfPromotion(actorType, actorID string, issue db.Issue) bool {
+// isAgentRunningOnIssue reports whether the calling agent's current task
+// (identified by X-Task-ID) is running for the exact issue being promoted.
+// That is the only true self-loop on backlog→active: the agent flipping
+// the same issue its own task is executing for would immediately re-enqueue
+// itself, complete the run, flip again, and so on.
+//
+// Same-agent cross-issue handoff (Agent A finishing a task on issue I1 then
+// promoting issue I2 — even when I2 is also assigned to A) is NOT a loop
+// and must fire; that is the documented serial sub-task chain. Member
+// actors never match.
+//
+// X-Task-ID is guaranteed to be present and consistent when actorType is
+// "agent": resolveActor demotes the actor to "member" otherwise (handler.go
+// resolveActor). We still recheck defensively — a future caller could pass
+// agent identity through a different path.
+func (h *Handler) isAgentRunningOnIssue(r *http.Request, actorType string, issue db.Issue) bool {
 	if actorType != "agent" {
 		return false
 	}
-	if !issue.AssigneeType.Valid || issue.AssigneeType.String != "agent" {
+	taskIDStr := r.Header.Get("X-Task-ID")
+	if taskIDStr == "" {
 		return false
 	}
-	return actorID == uuidToString(issue.AssigneeID)
+	taskUUID, err := util.ParseUUID(taskIDStr)
+	if err != nil {
+		return false
+	}
+	task, err := h.Queries.GetAgentTask(r.Context(), taskUUID)
+	if err != nil {
+		return false
+	}
+	if !task.IssueID.Valid {
+		return false
+	}
+	return uuidToString(task.IssueID) == uuidToString(issue.ID)
 }
 
 // isAgentAssigneeReady checks if an issue is assigned to an active agent
@@ -2691,11 +2714,11 @@ func (h *Handler) BatchUpdateIssues(w http.ResponseWriter, r *http.Request) {
 
 		// Trigger agent when moving out of backlog (batch). Mirrors the
 		// single-update path above — agent actors are allowed so serial
-		// sub-task chains work, with the self-promotion guard preventing
-		// an agent from triggering itself.
+		// sub-task chains work, and the same task-issue self-loop guard
+		// prevents an agent from re-triggering itself on the same issue.
 		if statusChanged && !assigneeChanged &&
 			prevIssue.Status == "backlog" && issue.Status != "done" && issue.Status != "cancelled" &&
-			!isAgentSelfPromotion(actorType, actorID, issue) {
+			!h.isAgentRunningOnIssue(r, actorType, issue) {
 			if h.isAgentAssigneeReady(r.Context(), issue) {
 				h.TaskService.EnqueueTaskForIssue(r.Context(), issue)
 			}

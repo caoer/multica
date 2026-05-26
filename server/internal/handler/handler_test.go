@@ -209,18 +209,35 @@ func createHandlerTestAgent(t *testing.T, name string, mcpConfig []byte) string 
 }
 
 // createHandlerTestTaskForAgent seeds a queued agent_task_queue row for the
-// given agent and returns the task UUID. Used by tests that need to set
-// X-Task-ID alongside X-Agent-ID — resolveActor now requires the pair to be
-// present and consistent before granting "agent" actor identity.
+// given agent (with no associated issue) and returns the task UUID. Used by
+// tests that need to set X-Task-ID alongside X-Agent-ID — resolveActor now
+// requires the pair to be present and consistent before granting "agent"
+// actor identity.
 func createHandlerTestTaskForAgent(t *testing.T, agentID string) string {
+	return createHandlerTestTaskForAgentOnIssue(t, agentID, "")
+}
+
+// createHandlerTestTaskForAgentOnIssue seeds a queued agent_task_queue row
+// for the given agent, optionally bound to an issue (pass "" to leave
+// issue_id NULL). The bound-issue form is needed by the self-loop guard
+// test, which compares the calling task's issue_id against the promoted
+// issue — only a same-issue match counts as a true self-loop.
+func createHandlerTestTaskForAgentOnIssue(t *testing.T, agentID, issueID string) string {
 	t.Helper()
+
+	var issueArg any
+	if issueID == "" {
+		issueArg = nil
+	} else {
+		issueArg = issueID
+	}
 
 	var taskID string
 	if err := testPool.QueryRow(context.Background(), `
-		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority)
-		VALUES ($1, $2, 'queued', 0)
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority, issue_id)
+		VALUES ($1, $2, 'queued', 0, $3)
 		RETURNING id
-	`, agentID, handlerTestRuntimeID(t)).Scan(&taskID); err != nil {
+	`, agentID, handlerTestRuntimeID(t), issueArg).Scan(&taskID); err != nil {
 		t.Fatalf("failed to create handler test task: %v", err)
 	}
 	t.Cleanup(func() {
@@ -2685,18 +2702,24 @@ func TestBacklogToTodoByAgentTriggersDifferentAssignee(t *testing.T) {
 	}
 }
 
-// TestBacklogToTodoByAgentDoesNotSelfTrigger verifies the self-loop guard:
-// an agent flipping its own backlog issue to an active status must NOT
-// enqueue itself. Without this guard the agent would re-trigger every
-// time it completed a run, then immediately re-enter the same path.
-func TestBacklogToTodoByAgentDoesNotSelfTrigger(t *testing.T) {
+// TestBacklogToTodoByAgentSameIssueDoesNotSelfTrigger verifies the
+// task-issue-scoped self-loop guard: an agent whose CURRENT task is
+// running on issue I and who flips I from backlog to an active status
+// must NOT enqueue itself for I again. Without this guard the agent
+// would re-trigger every cycle it completed on I and immediately
+// re-enter the same path.
+//
+// This is the true self-loop case (calling task is on the SAME issue
+// being promoted). The complementary case — same agent, DIFFERENT
+// issue — is the documented serial chain and is covered by
+// TestBacklogToTodoByAgentSameAgentDifferentIssue.
+func TestBacklogToTodoByAgentSameIssueDoesNotSelfTrigger(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
 	}
 	ctx := context.Background()
 
 	selfAgent := createHandlerTestAgent(t, "Backlog Self Agent", nil)
-	selfTask := createHandlerTestTaskForAgent(t, selfAgent)
 
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
@@ -2716,7 +2739,9 @@ func TestBacklogToTodoByAgentDoesNotSelfTrigger(t *testing.T) {
 		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, created.ID)
 	})
 
-	// Self-promotion: actor agent == assignee agent. Must NOT enqueue.
+	// Task bound to the SAME issue being promoted — true self-loop.
+	selfTask := createHandlerTestTaskForAgentOnIssue(t, selfAgent, created.ID)
+
 	w = httptest.NewRecorder()
 	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{"status": "todo"})
 	req = withURLParam(req, "id", created.ID)
@@ -2735,7 +2760,210 @@ func TestBacklogToTodoByAgentDoesNotSelfTrigger(t *testing.T) {
 		t.Fatalf("failed to count tasks: %v", err)
 	}
 	if tasks != 0 {
-		t.Fatalf("expected no self-trigger after agent promoted its own backlog issue, got %d queued tasks", tasks)
+		t.Fatalf("expected no self-trigger when agent promotes the same issue its task is running on, got %d queued tasks", tasks)
+	}
+}
+
+// TestBacklogToTodoByAgentSameAgentDifferentIssue verifies the documented
+// same-agent serial chain still fires: when an agent is running a task on
+// issue I1 and promotes a DIFFERENT backlog issue I2 (also assigned to
+// itself), I2 must be enqueued. This was over-blocked by the previous
+// agent-id-based self-loop guard, which made the same-agent serial
+// workflow silently break.
+func TestBacklogToTodoByAgentSameAgentDifferentIssue(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	agentID := createHandlerTestAgent(t, "Backlog Same-Agent Chain", nil)
+
+	// Step 1 issue — the one the agent is currently working on.
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Step 1 (running)",
+		"status":        "in_progress",
+		"assignee_type": "agent",
+		"assignee_id":   agentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue step1: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var step1 IssueResponse
+	json.NewDecoder(w.Body).Decode(&step1)
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, step1.ID)
+		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, step1.ID)
+	})
+
+	// Step 2 issue — backlog, also assigned to the same agent.
+	w = httptest.NewRecorder()
+	req = newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Step 2 (backlog)",
+		"status":        "backlog",
+		"assignee_type": "agent",
+		"assignee_id":   agentID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue step2: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var step2 IssueResponse
+	json.NewDecoder(w.Body).Decode(&step2)
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, step2.ID)
+		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, step2.ID)
+	})
+
+	// Task is running on step1 — promoting step2 is NOT a self-loop.
+	step1Task := createHandlerTestTaskForAgentOnIssue(t, agentID, step1.ID)
+
+	w = httptest.NewRecorder()
+	req = newRequest("PUT", "/api/issues/"+step2.ID, map[string]any{"status": "todo"})
+	req = withURLParam(req, "id", step2.ID)
+	req.Header.Set("X-Agent-ID", agentID)
+	req.Header.Set("X-Task-ID", step1Task)
+	testHandler.UpdateIssue(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue step2: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var step2Tasks int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		step2.ID, agentID,
+	).Scan(&step2Tasks); err != nil {
+		t.Fatalf("failed to count step2 tasks: %v", err)
+	}
+	if step2Tasks != 1 {
+		t.Fatalf("expected exactly 1 task enqueued on step2 for same-agent serial chain, got %d", step2Tasks)
+	}
+}
+
+// TestBatchBacklogToTodoByAgentTriggersAssignee mirrors the single-update
+// serial-chain test on the BatchUpdateIssues path. Earlier the
+// member-only gate would silently drop agent-driven batch promotions; the
+// task-issue self-loop guard must let cross-issue (same-agent) batch
+// promotions through.
+func TestBatchBacklogToTodoByAgentTriggersAssignee(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	parentAgent := createHandlerTestAgent(t, "Batch Parent Agent", nil)
+	childAgent := createHandlerTestAgent(t, "Batch Child Agent", nil)
+	parentTask := createHandlerTestTaskForAgent(t, parentAgent)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Batch backlog child",
+		"status":        "backlog",
+		"assignee_type": "agent",
+		"assignee_id":   childAgent,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created IssueResponse
+	json.NewDecoder(w.Body).Decode(&created)
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, created.ID)
+		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, created.ID)
+	})
+
+	// Drive the batch endpoint with the same agent identity headers.
+	w = httptest.NewRecorder()
+	req = newRequest("PATCH", "/api/issues/batch?workspace_id="+testWorkspaceID, map[string]any{
+		"issue_ids": []string{created.ID},
+		"updates":   map[string]any{"status": "todo"},
+	})
+	req.Header.Set("X-Agent-ID", parentAgent)
+	req.Header.Set("X-Task-ID", parentTask)
+	testHandler.BatchUpdateIssues(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("BatchUpdateIssues: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var childTasks int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		created.ID, childAgent,
+	).Scan(&childTasks); err != nil {
+		t.Fatalf("failed to count child tasks: %v", err)
+	}
+	if childTasks != 1 {
+		t.Fatalf("expected exactly 1 task enqueued for child agent after batch agent-driven backlog→todo, got %d", childTasks)
+	}
+}
+
+// TestBacklogToTodoByAgentTriggersSquadLeader covers the squad branch of
+// the backlog→active trigger when the actor is an agent: the leader agent
+// of a squad must wake when one of its squad-assigned backlog issues is
+// promoted by another agent (or by the leader itself acting from a task
+// on a different issue). The task-issue self-loop guard must allow this —
+// only a true same-issue self-loop should be suppressed.
+func TestBacklogToTodoByAgentTriggersSquadLeader(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	leaderAgent := createHandlerTestAgent(t, "Backlog Squad Leader", nil)
+	driverAgent := createHandlerTestAgent(t, "Backlog Squad Driver", nil)
+	driverTask := createHandlerTestTaskForAgent(t, driverAgent)
+
+	var squadID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO squad (workspace_id, name, description, leader_id, creator_id)
+		VALUES ($1, $2, '', $3, $4)
+		RETURNING id
+	`, testWorkspaceID, "Backlog Trigger Squad", leaderAgent, testUserID).Scan(&squadID); err != nil {
+		t.Fatalf("create squad: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(ctx, `DELETE FROM squad WHERE id = $1`, squadID) })
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/issues?workspace_id="+testWorkspaceID, map[string]any{
+		"title":         "Squad backlog issue",
+		"status":        "backlog",
+		"assignee_type": "squad",
+		"assignee_id":   squadID,
+	})
+	testHandler.CreateIssue(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("CreateIssue: expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var created IssueResponse
+	json.NewDecoder(w.Body).Decode(&created)
+	t.Cleanup(func() {
+		testPool.Exec(ctx, `DELETE FROM agent_task_queue WHERE issue_id = $1`, created.ID)
+		testPool.Exec(ctx, `DELETE FROM issue WHERE id = $1`, created.ID)
+	})
+
+	// Driver agent (not the leader, task is on no specific issue) promotes
+	// the squad-assigned backlog issue. Squad leader must be enqueued.
+	w = httptest.NewRecorder()
+	req = newRequest("PUT", "/api/issues/"+created.ID, map[string]any{"status": "todo"})
+	req = withURLParam(req, "id", created.ID)
+	req.Header.Set("X-Agent-ID", driverAgent)
+	req.Header.Set("X-Task-ID", driverTask)
+	testHandler.UpdateIssue(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("UpdateIssue: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var leaderTasks int
+	if err := testPool.QueryRow(ctx,
+		`SELECT count(*) FROM agent_task_queue WHERE issue_id = $1 AND agent_id = $2 AND status = 'queued'`,
+		created.ID, leaderAgent,
+	).Scan(&leaderTasks); err != nil {
+		t.Fatalf("failed to count leader tasks: %v", err)
+	}
+	if leaderTasks != 1 {
+		t.Fatalf("expected exactly 1 squad-leader task after agent-driven backlog→todo on squad issue, got %d", leaderTasks)
 	}
 }
 
