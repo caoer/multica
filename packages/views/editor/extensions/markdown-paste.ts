@@ -66,15 +66,20 @@ const SEMANTIC_RICH_HTML_SELECTOR = [
   "u",
   "ul",
 ].join(",");
+const RAW_HTML_TAG_RE = /<(\/?[a-zA-Z][a-zA-Z0-9-]*)(?:\s[^>]*)?\/?>/g;
 
 // CommonMark treats <word> as raw HTML regardless of whether "word" is a real
 // HTML element. For plain-text paste, the user's text is the source of truth, so
 // escape tag-like runs before the Markdown lexer can classify them as HTML.
 function escapeRawHtmlTagsInSegment(segment: string): string {
   return segment.replace(
-    /<(\/?[a-zA-Z][a-zA-Z0-9-]*)(?:\s[^>]*)?\/?>/g,
+    RAW_HTML_TAG_RE,
     (match) => match.replaceAll("<", "&lt;").replaceAll(">", "&gt;"),
   );
+}
+
+function collectRawHtmlTagsInSegment(segment: string): string[] {
+  return segment.match(RAW_HTML_TAG_RE) ?? [];
 }
 
 function escapeTagsOutsideCodeSpans(line: string): string {
@@ -121,6 +126,48 @@ function escapeTagsOutsideCodeSpans(line: string): string {
   return parts.join("");
 }
 
+function collectTagsOutsideCodeSpans(line: string): string[] {
+  const tags: string[] = [];
+  let i = 0;
+
+  while (i < line.length) {
+    if (line[i] === "`") {
+      let count = 0;
+      while (i + count < line.length && line[i + count] === "`") count++;
+      const delimiter = "`".repeat(count);
+      const afterOpener = i + count;
+
+      let closerIdx = afterOpener;
+      let found = false;
+      while (closerIdx <= line.length - count) {
+        const idx = line.indexOf(delimiter, closerIdx);
+        if (idx === -1) break;
+        if (
+          (idx + count >= line.length || line[idx + count] !== "`") &&
+          (idx === 0 || line[idx - 1] !== "`")
+        ) {
+          i = idx + count;
+          found = true;
+          break;
+        }
+        closerIdx = idx + 1;
+      }
+
+      if (!found) {
+        i = afterOpener;
+      }
+      continue;
+    }
+
+    const nextBacktick = line.indexOf("`", i);
+    const end = nextBacktick === -1 ? line.length : nextBacktick;
+    tags.push(...collectRawHtmlTagsInSegment(line.slice(i, end)));
+    i = end;
+  }
+
+  return tags;
+}
+
 export function escapeRawHtmlTagsOutsideCode(text: string): string {
   const lines = text.split("\n");
   let inFencedBlock = false;
@@ -152,6 +199,41 @@ export function escapeRawHtmlTagsOutsideCode(text: string): string {
   });
 
   return processed.join("\n");
+}
+
+function findRawHtmlTagsOutsideCode(text: string): string[] {
+  const lines = text.split("\n");
+  const tags: string[] = [];
+  let inFencedBlock = false;
+  let fenceChar = "";
+  let fenceLen = 0;
+
+  for (const line of lines) {
+    const fenceMatch = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    const fence = fenceMatch?.[1];
+    if (fence) {
+      if (!inFencedBlock) {
+        inFencedBlock = true;
+        fenceChar = fence.charAt(0);
+        fenceLen = fence.length;
+        continue;
+      }
+      const isClosingFence =
+        fence.charAt(0) === fenceChar &&
+        fence.length >= fenceLen &&
+        /^ {0,3}(`{3,}|~{3,})[ \t]*$/.test(line);
+      if (isClosingFence) {
+        inFencedBlock = false;
+        continue;
+      }
+    }
+
+    if (!inFencedBlock) {
+      tags.push(...collectTagsOutsideCodeSpans(line));
+    }
+  }
+
+  return tags;
 }
 
 type PasteMode = "native" | "literal" | "markdown";
@@ -193,9 +275,41 @@ function hasRichStyle(style: string): boolean {
   );
 }
 
-function hasSemanticRichHtml(html: string): boolean {
+function countOccurrences(text: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let index = text.indexOf(needle);
+  while (index !== -1) {
+    count++;
+    index = text.indexOf(needle, index + needle.length);
+  }
+  return count;
+}
+
+function htmlPreservesRawTagsFromPlainText(html: string, text: string): boolean {
+  const tags = findRawHtmlTagsOutsideCode(text);
+  if (tags.length === 0) return true;
+  if (typeof DOMParser === "undefined") return false;
+
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const htmlText = doc.body?.textContent ?? "";
+  const expectedCounts = new Map<string, number>();
+  for (const tag of tags) {
+    expectedCounts.set(tag, (expectedCounts.get(tag) ?? 0) + 1);
+  }
+
+  for (const [tag, expectedCount] of expectedCounts) {
+    if (countOccurrences(htmlText, tag) < expectedCount) return false;
+  }
+
+  return true;
+}
+
+function hasSemanticRichHtml(html: string, text: string): boolean {
   if (!html.trim()) return false;
   if (typeof DOMParser === "undefined") return false;
+
+  if (!htmlPreservesRawTagsFromPlainText(html, text)) return false;
 
   const doc = new DOMParser().parseFromString(html, "text/html");
   const { body } = doc;
@@ -227,7 +341,7 @@ function classifyPaste({
   if (!text) return "native";
   if (isInsideCodeBlock) return "literal";
   if (html && html.includes("data-pm-slice")) return "native";
-  if (html && hasSemanticRichHtml(html)) return "native";
+  if (html && hasSemanticRichHtml(html, text)) return "native";
   if (text.length > LARGE_PASTE_TEXT_THRESHOLD) return "literal";
   if (isStructuredPlainText(text)) return "literal";
   return "markdown";

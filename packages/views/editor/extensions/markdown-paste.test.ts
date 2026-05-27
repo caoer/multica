@@ -183,6 +183,34 @@ describe("markdownPaste — code block context", () => {
     expect(parseSpy).not.toHaveBeenCalled();
   });
 
+  it("does not paste rich HTML natively when its text would drop raw tag-like lines", () => {
+    editor = makeEditor({
+      type: "doc",
+      content: [{ type: "paragraph" }],
+    });
+
+    editor.commands.setTextSelection(1);
+
+    const text =
+      "<t>\n\n裸 `<tag>` 做转\n\n<tag>\n\n" +
+      "<t>\n\n裸 `<tag>` 做转\n\n<tag>";
+    const html =
+      "<div><t></t></div>" +
+      "<p>裸 <code>&lt;tag&gt;</code> 做转</p>" +
+      "<div><tag></tag></div>" +
+      "<div><t></t></div>" +
+      "<p>裸 <code>&lt;tag&gt;</code> 做转</p>" +
+      "<div><tag></tag></div>";
+
+    const handled = paste(editor, text, html);
+    expect(handled).toBe(true);
+
+    const editorText = editor.getText();
+    expect(editorText.match(/<t>/g)).toHaveLength(2);
+    expect(editorText.match(/<tag>/g)).toHaveLength(4);
+    expect(editorText.match(/裸/g)).toHaveLength(2);
+  });
+
   it("still parses Markdown when HTML is only a syntax-highlight wrapper", () => {
     editor = makeEditor({
       type: "doc",
