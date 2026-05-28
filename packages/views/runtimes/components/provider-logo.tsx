@@ -138,23 +138,13 @@ function GeminiLogo({ className }: { className: string }) {
   );
 }
 
-// Antigravity (Google) — original mark: a planet-and-arc glyph evoking the
-// "lift" idea behind the product name, rendered in Google's signature blue.
-// Drawn in-repo so we don't depend on Google's CDN at runtime.
+// Antigravity (Google) — official mark, shipped as a PNG asset next to
+// this file. Bundler (Next.js / electron-vite) resolves the import to a
+// URL string at build time.
+import antigravityLogo from "./antigravity-logo.png";
+
 function AntigravityLogo({ className }: { className: string }) {
-  return (
-    <svg viewBox="0 0 24 24" fill="none" className={className}>
-      <circle cx="12" cy="13" r="6" fill="#4285F4" />
-      <path
-        d="M4 10c2.5-3.5 7-5 11-3.5 2.7 1 5 3 5 3"
-        stroke="#4285F4"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        fill="none"
-      />
-      <circle cx="12" cy="13" r="1.6" fill="#FFFFFF" />
-    </svg>
-  );
+  return <img src={antigravityLogo} alt="Antigravity" className={className} />;
 }
 
 // Kiro CLI — official icon sourced from kiro.dev/icon.svg.
