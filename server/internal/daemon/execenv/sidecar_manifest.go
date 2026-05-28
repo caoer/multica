@@ -288,7 +288,7 @@ func CleanupSidecars(envRoot string) error {
 	}
 
 	// Reverse iterate so the deepest directory is tried first. When
-	// rmdir fails we re-stat the directory to tell ENOTEMPTY (user
+	// rmdir fails we re-read the directory to tell ENOTEMPTY (user
 	// content present — skip silently) apart from real I/O errors
 	// (permission denied, busy, etc. — capture and surface).
 	for i := len(m.Dirs) - 1; i >= 0; i-- {
@@ -297,18 +297,31 @@ func CleanupSidecars(envRoot string) error {
 		if err == nil || errors.Is(err, fs.ErrNotExist) {
 			continue
 		}
-		if dirHasEntries(d) {
+		hasEntries, ok := dirHasEntries(d)
+		switch {
+		case !ok:
+			// ReadDir also failed — we can't tell ENOTEMPTY apart
+			// from a real I/O error. Surface the ORIGINAL rmdir
+			// error (not the ReadDir failure) so the operator sees
+			// the actual cleanup blocker; the ReadDir branch is
+			// just diagnostic plumbing and would distract from the
+			// root cause. Silently skipping here was the v1 bug:
+			// it hid EACCES on locked directories behind a phantom
+			// "directory non-empty" assumption.
+			captureErr(fmt.Errorf("rmdir %s: %w", d, err))
+		case hasEntries:
 			// User has populated this dir since Prepare ran. Leave
 			// it in place without surfacing the rmdir error — the
 			// whole point of the manifest design is to preserve
 			// user content under directories we created.
-			continue
+		default:
+			// Empty directory but rmdir still failed → real I/O
+			// error (EACCES, EPERM, EBUSY, EIO, or a directory we
+			// mistakenly recorded that we don't actually own).
+			// Surface it so the caller can log a warning and an
+			// operator can investigate.
+			captureErr(fmt.Errorf("rmdir %s: %w", d, err))
 		}
-		// Empty directory but rmdir still failed → real I/O error
-		// (EACCES, EPERM, EBUSY, EIO, or a directory we mistakenly
-		// recorded that we don't actually own). Surface it so the
-		// caller can log a warning and an operator can investigate.
-		captureErr(fmt.Errorf("rmdir %s: %w", d, err))
 	}
 
 	if err := os.Remove(manifestPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -318,21 +331,34 @@ func CleanupSidecars(envRoot string) error {
 	return firstErr
 }
 
-// dirHasEntries reports whether dir currently contains any entries.
-// CleanupSidecars uses it to distinguish ENOTEMPTY (silently skip) from
-// genuine rmdir failures (surface as an error). A directory that
-// disappeared between rmdir and readdir is reported as empty so the
-// race collapses into the "no work to do" branch rather than spurious
-// failures. Any other readdir error is reported as non-empty so the
-// caller surfaces the original rmdir error rather than silently
-// swallowing it — we'd rather over-report errors than under-report.
-func dirHasEntries(dir string) bool {
+// dirHasEntries inspects dir and reports whether it currently contains
+// any entries. The second return value distinguishes three states
+// CleanupSidecars must handle separately:
+//
+//   - (false, true) — dir exists and is empty, OR dir disappeared
+//     between the failed rmdir and our readdir (the race collapses
+//     into "empty" so cleanup keeps moving). When paired with a
+//     non-ENOENT rmdir failure in CleanupSidecars this is the
+//     "empty + rmdir refused" branch — a real I/O error that gets
+//     surfaced.
+//   - (true, true) — dir has user content. When paired with a rmdir
+//     failure this is the intended ENOTEMPTY branch — skip silently
+//     so the user's content is preserved.
+//   - (_, false) — readdir failed with a real I/O error (EACCES on a
+//     chmod'd dir, ENOTDIR on a recorded path that isn't actually a
+//     dir, EIO on a hardware fault, etc.). The caller cannot tell
+//     ENOTEMPTY from a real failure and MUST surface the original
+//     rmdir error instead of silently skipping. The v1 of this
+//     helper returned `true` here, which made CleanupSidecars treat
+//     every readdir failure as "user content present" and hid the
+//     underlying rmdir error.
+func dirHasEntries(dir string) (hasEntries bool, ok bool) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			return false
+			return false, true
 		}
-		return true
+		return false, false
 	}
-	return len(entries) > 0
+	return len(entries) > 0, true
 }
