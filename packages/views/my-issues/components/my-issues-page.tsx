@@ -3,11 +3,9 @@
 import { useCallback, useEffect, useMemo } from "react";
 import { useStore } from "zustand";
 import { toast } from "sonner";
-import { ChevronRight, ListTodo } from "lucide-react";
+import { ListTodo } from "lucide-react";
 import type { UpdateIssueRequest } from "@multica/core/types";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
-import { useCurrentWorkspace } from "@multica/core/paths";
-import { WorkspaceAvatar } from "../../workspace/workspace-avatar";
 import { useQuery } from "@tanstack/react-query";
 import { filterIssues, EMPTY_CLIENT_FILTERS } from "../../issues/utils/filter";
 import { BOARD_STATUSES } from "@multica/core/issues/config";
@@ -31,7 +29,6 @@ import { MyIssuesHeader } from "./my-issues-header";
 
 export function MyIssuesPage() {
   const { t } = useT("my-issues");
-  const workspace = useCurrentWorkspace();
   const wsId = useWorkspaceId();
   const viewMode = useStore(myIssuesViewStore, (s) => s.viewMode);
   const currentViewId = useStore(myIssuesViewStore, (s) => s.currentViewId);
@@ -226,14 +223,9 @@ export function MyIssuesPage() {
 
   return (
     <div className="flex flex-1 min-h-0 flex-col">
-      {/* Header 1: Workspace breadcrumb */}
-      <PageHeader className="gap-1.5">
-        <WorkspaceAvatar name={workspace?.name ?? "W"} size="sm" />
-        <span className="text-sm text-muted-foreground">
-          {workspace?.name ?? t(($) => $.page.workspace_fallback)}
-        </span>
-        <ChevronRight className="h-3 w-3 text-muted-foreground" />
-        <span className="text-sm font-medium">{t(($) => $.page.breadcrumb)}</span>
+      <PageHeader className="gap-2">
+        <ListTodo className="h-4 w-4 text-muted-foreground" />
+        <h1 className="text-sm font-medium">{t(($) => $.page.breadcrumb)}</h1>
       </PageHeader>
 
       <ViewStoreProvider store={myIssuesViewStore}>

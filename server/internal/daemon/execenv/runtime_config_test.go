@@ -156,9 +156,9 @@ func TestCommentTriggeredProtocolDoesNotForceInReview(t *testing.T) {
 	}
 }
 
-// The CLAUDE.md workflow surface must carry the same since-delta new-comment
-// hint as the per-turn prompt. PR #2816 requires the two surfaces stay in sync,
-// so this pins the count-driven `--since` hint into the comment-triggered brief.
+// The CLAUDE.md workflow surface must carry the same thread-scoped since-delta
+// new-comment hint as the per-turn prompt. PR #2816 requires the two surfaces
+// stay in sync.
 func TestCommentTriggeredBriefCarriesNewCommentsHint(t *testing.T) {
 	t.Parallel()
 	const (
@@ -173,11 +173,22 @@ func TestCommentTriggeredBriefCarriesNewCommentsHint(t *testing.T) {
 	}
 	out := buildMetaSkillContent("claude", ctx)
 
-	if !strings.Contains(out, "4 new comment(s) since your last run") {
+	if !strings.Contains(out, "4 other new comment(s) in this thread since your last run") {
 		t.Errorf("comment brief must report the new-comment count, got:\n%s", out)
 	}
-	if !strings.Contains(out, "--since "+since+" --output json") {
-		t.Errorf("comment brief must point at the --since catch-up read, got:\n%s", out)
+	if !strings.Contains(out, "--thread reply-abc --since "+since+" --output json") {
+		t.Errorf("comment brief must point at the thread-scoped --since catch-up read, got:\n%s", out)
+	}
+	if !strings.Contains(out, "raw thread delta") {
+		t.Errorf("comment brief must not imply the CLI output exactly matches the count, got:\n%s", out)
+	}
+	if strings.Contains(out, "resumed session is missing older thread context") {
+		t.Errorf("comment brief warm fallback wording must not assume a resumed session, got:\n%s", out)
+	}
+	// Warm path also keeps a bounded full-thread pointer for the triggering
+	// thread's pre-anchor history that --since cannot cover.
+	if !strings.Contains(out, "--thread reply-abc --tail 30 --output json") {
+		t.Errorf("warm brief must also point at the triggering thread, got:\n%s", out)
 	}
 	// The removed resolve step must not reappear.
 	if strings.Contains(out, "multica comment resolve") {
@@ -185,12 +196,14 @@ func TestCommentTriggeredBriefCarriesNewCommentsHint(t *testing.T) {
 	}
 }
 
-// Cold start (no prior run → no since anchor) must fall back to the plain read
-// line instead of the since-delta hint.
-func TestCommentTriggeredBriefColdStartNoHint(t *testing.T) {
+// Cold start (no prior run → no since anchor) must point the agent at the
+// triggering CONVERSATION (--thread <trigger> --tail 30) instead of the flat
+// timeline dump or the since-delta hint.
+func TestCommentTriggeredBriefColdStartThreadRead(t *testing.T) {
 	t.Parallel()
+	const issueID = "55555555-6666-7777-8888-999999999999"
 	ctx := TaskContextForEnv{
-		IssueID:          "55555555-6666-7777-8888-999999999999",
+		IssueID:          issueID,
 		TriggerCommentID: "trigger-1",
 		NewCommentCount:  0,
 		NewCommentsSince: "",
@@ -199,8 +212,39 @@ func TestCommentTriggeredBriefColdStartNoHint(t *testing.T) {
 	if strings.Contains(out, "new comment(s) since your last run") {
 		t.Errorf("no since-delta hint should render on cold start, got:\n%s", out)
 	}
-	if !strings.Contains(out, "Catch up on comments") {
-		t.Errorf("cold start must fall back to the plain catch-up line, got:\n%s", out)
+	if !strings.Contains(out, "multica issue comment list "+issueID+" --thread trigger-1 --tail 30 --output json") {
+		t.Errorf("cold start must point at the triggering thread read, got:\n%s", out)
+	}
+}
+
+// A resumed comment session with no since-delta should not fall back to the
+// cold-start "read the triggering conversation first" instruction. The trigger
+// body is already embedded in the per-turn prompt and the resumed session should
+// carry prior thread context, so the thread read is only a fallback.
+func TestCommentTriggeredBriefResumedNoDeltaSkipsDefaultThreadRead(t *testing.T) {
+	t.Parallel()
+	const issueID = "55555555-6666-7777-8888-999999999999"
+	ctx := TaskContextForEnv{
+		IssueID:             issueID,
+		TriggerCommentID:    "trigger-1",
+		PriorSessionResumed: true,
+		NewCommentCount:     0,
+		NewCommentsSince:    "",
+	}
+	out := buildMetaSkillContent("claude", ctx)
+
+	for _, want := range []string{
+		"triggering comment is already included above",
+		"Do not re-read comment history by default",
+		"Only if the resumed session is missing thread context",
+		"multica issue comment list " + issueID + " --thread trigger-1 --tail 30 --output json",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("resumed/no-delta brief missing %q\n--- output ---\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "Read the triggering conversation first") {
+		t.Errorf("resumed/no-delta brief must not use the cold-start forced-read wording, got:\n%s", out)
 	}
 }
 

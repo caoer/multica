@@ -269,7 +269,7 @@ func TestProjectReposReplaceWorkspaceReposInMetaSkill(t *testing.T) {
 func TestWriteProjectResourcesSkippedWhenNone(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	if err := writeProjectResources(dir, TaskContextForEnv{}); err != nil {
+	if err := writeProjectResources(dir, TaskContextForEnv{}, nil); err != nil {
 		t.Fatalf("writeProjectResources: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".multica", "project", "resources.json")); !os.IsNotExist(err) {
@@ -352,7 +352,7 @@ func TestWriteContextFiles(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "", ctx); err != nil {
+	if err := writeContextFiles(dir, "", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -405,7 +405,7 @@ func TestWriteContextFilesOmitsSkillsWhenEmpty(t *testing.T) {
 		IssueID: "minimal-issue-id",
 	}
 
-	if err := writeContextFiles(dir, "", ctx); err != nil {
+	if err := writeContextFiles(dir, "", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -435,7 +435,7 @@ func TestWriteContextFilesAutopilotRunOnly(t *testing.T) {
 		AutopilotSource:      "manual",
 	}
 
-	if err := writeContextFiles(dir, "", ctx); err != nil {
+	if err := writeContextFiles(dir, "", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -479,7 +479,7 @@ func TestWriteContextFilesClaudeNativeSkills(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "claude", ctx); err != nil {
+	if err := writeContextFiles(dir, "claude", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -757,7 +757,7 @@ func TestWriteContextFilesCopilotNativeSkills(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "copilot", ctx); err != nil {
+	if err := writeContextFiles(dir, "copilot", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -808,7 +808,7 @@ func TestWriteContextFilesOpencodeNativeSkills(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "opencode", ctx); err != nil {
+	if err := writeContextFiles(dir, "opencode", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -880,7 +880,7 @@ func TestWriteContextFilesPreservesExistingSkillFrontmatter(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "opencode", ctx); err != nil {
+	if err := writeContextFiles(dir, "opencode", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -915,7 +915,7 @@ func TestWriteContextFilesInjectsNameIntoNamelessFrontmatter(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "opencode", ctx); err != nil {
+	if err := writeContextFiles(dir, "opencode", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -953,7 +953,7 @@ func TestWriteContextFilesOpenclawNativeSkills(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "openclaw", ctx); err != nil {
+	if err := writeContextFiles(dir, "openclaw", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -993,7 +993,7 @@ func TestWriteContextFilesKiroNativeSkills(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "kiro", ctx); err != nil {
+	if err := writeContextFiles(dir, "kiro", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -1125,7 +1125,7 @@ func TestWriteContextFilesAntigravityNativeSkills(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "antigravity", ctx); err != nil {
+	if err := writeContextFiles(dir, "antigravity", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -1550,7 +1550,7 @@ func TestWriteContextFilesHermesFallbackSkills(t *testing.T) {
 		},
 	}
 
-	if err := writeContextFiles(dir, "hermes", ctx); err != nil {
+	if err := writeContextFiles(dir, "hermes", ctx, nil); err != nil {
 		t.Fatalf("writeContextFiles failed: %v", err)
 	}
 
@@ -3346,11 +3346,12 @@ func TestBuildMetaSkillContentOmitsRequestingUserWhenEmpty(t *testing.T) {
 }
 
 // TestInjectRuntimeConfigCommentTriggerColdStartRead checks the
-// comment-triggered Workflow on cold start (no prior run): it falls back to a
-// plain catch-up read with no since-delta hint, while the Available Commands
-// core line still surfaces the thread/recent/cursor flags so they remain
-// discoverable for CLI use even though the verbose cursor walkthrough was
-// dropped from the workflow steps.
+// comment-triggered Workflow on cold start (no prior run): it points the agent
+// at the triggering thread (--thread <trigger> --tail 30) instead of the flat
+// dump and with no since-delta hint, while the Available Commands core line
+// still surfaces the thread/recent/cursor flags so they remain discoverable for
+// CLI use even though the verbose cursor walkthrough was dropped from the
+// workflow steps.
 func TestInjectRuntimeConfigCommentTriggerColdStartRead(t *testing.T) {
 	t.Parallel()
 
@@ -3372,10 +3373,11 @@ func TestInjectRuntimeConfigCommentTriggerColdStartRead(t *testing.T) {
 	}
 	s := string(data)
 
-	// Cold start (no prior run) → plain catch-up line, no since-delta hint.
+	// Cold start (no prior run) → read the triggering thread, not the flat dump,
+	// and no since-delta hint.
 	for _, want := range []string{
-		"Catch up on comments",
-		"multica issue comment list " + issueID + " --output json",
+		"Read the triggering conversation first",
+		"multica issue comment list " + issueID + " --thread " + triggerID + " --tail 30 --output json",
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("comment-triggered Workflow missing cold-start read %q\n---\n%s", want, s)
@@ -3407,6 +3409,48 @@ func TestInjectRuntimeConfigCommentTriggerColdStartRead(t *testing.T) {
 	// regression target: it dumps the entire thread on long threads.
 	if strings.Contains(s, "multica issue comment list "+issueID+" --thread "+triggerID+" --output json") {
 		t.Errorf("comment-triggered Workflow regressed to unbounded --thread recipe (no --tail) — long threads will overflow context\n---\n%s", s)
+	}
+}
+
+// TestInjectRuntimeConfigCommentTriggerResumedNoDeltaRead checks the
+// comment-triggered Workflow when the daemon is resuming a prior session and no
+// since-delta hint is present. In that shape, the agent already has session
+// context and the trigger body is injected in the per-turn prompt, so the
+// runtime brief must not force a duplicate thread read.
+func TestInjectRuntimeConfigCommentTriggerResumedNoDeltaRead(t *testing.T) {
+	t.Parallel()
+
+	const (
+		issueID   = "issue-resumed-1"
+		triggerID = "trigger-comment-1"
+	)
+	dir := t.TempDir()
+	ctx := TaskContextForEnv{
+		IssueID:             issueID,
+		TriggerCommentID:    triggerID,
+		PriorSessionResumed: true,
+	}
+	if _, err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	s := string(data)
+
+	for _, want := range []string{
+		"triggering comment is already included above",
+		"Do not re-read comment history by default",
+		"Only if the resumed session is missing thread context",
+		"multica issue comment list " + issueID + " --thread " + triggerID + " --tail 30 --output json",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("comment-triggered resumed Workflow missing %q\n---\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "Read the triggering conversation first") {
+		t.Errorf("resumed workflow must not force the cold-start thread read\n---\n%s", s)
 	}
 }
 

@@ -2367,11 +2367,28 @@ func (d *Daemon) reportTaskResult(ctx context.Context, taskID string, result Tas
 	switch result.Status {
 	case "completed":
 		taskLog.Info("task completed", "status", result.Status)
-		if err := d.client.CompleteTask(ctx, taskID, result.Comment, result.BranchName, result.SessionID, result.WorkDir); err != nil {
-			taskLog.Error("complete task failed, falling back to fail", "error", err)
-			if failErr := d.client.FailTask(ctx, taskID, fmt.Sprintf("complete task failed: %s", err.Error()), result.SessionID, result.WorkDir, "agent_error"); failErr != nil {
-				taskLog.Error("fail task fallback also failed", "error", failErr)
-			}
+		err := d.client.CompleteTask(ctx, taskID, result.Comment, result.BranchName, result.SessionID, result.WorkDir)
+		if err == nil {
+			return
+		}
+		// CompleteTask retries transient errors internally. A transient
+		// error reaching us here means the schedule was exhausted while
+		// the upstream was still 5xx / unreachable. Converting that into
+		// a fail would lose the agent's actual result and surface a
+		// misleading red badge in the UI — leave the task in running
+		// instead so a future fix (server-side stuck-task reaper, or a
+		// daemon-side persistent pending queue) can recover it. Only
+		// permanent server-side rejections (4xx other than 408/429)
+		// warrant the legacy fallback, because at that point the server
+		// has already refused this task and the only useful UI signal
+		// left is a concrete failure.
+		if isTransientError(err) {
+			taskLog.Error("complete task failed after retries; leaving task in running rather than falling back to fail", "error", err)
+			return
+		}
+		taskLog.Error("complete task rejected by server, falling back to fail", "error", err)
+		if failErr := d.client.FailTask(ctx, taskID, fmt.Sprintf("complete task failed: %s", err.Error()), result.SessionID, result.WorkDir, "agent_error"); failErr != nil {
+			taskLog.Error("fail task fallback also failed", "error", failErr)
 		}
 	default:
 		failureReason := result.FailureReason
@@ -2473,6 +2490,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		TriggerCommentID:                 task.TriggerCommentID,
 		NewCommentCount:                  task.NewCommentCount,
 		NewCommentsSince:                 task.NewCommentsSince,
+		PriorSessionResumed:              task.PriorSessionID != "",
 		AgentID:                          agentID,
 		AgentName:                        agentName,
 		AgentInstructions:                instructions,
@@ -2525,12 +2543,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 	// WorkDir is the user's own path (always present) but the reuse path
 	// loses the envRoot association the GC loop needs, and re-running
 	// Prepare against a stable user path is cheap (no clone, no copy).
+	var agentMcpConfig json.RawMessage
+	if task.Agent != nil {
+		agentMcpConfig = task.Agent.McpConfig
+	}
 	if task.PriorWorkDir != "" && localAssignment == nil {
 		env = execenv.Reuse(execenv.ReuseParams{
 			WorkDir:      task.PriorWorkDir,
 			Provider:     provider,
 			CodexVersion: codexVersion,
 			OpenclawBin:  openclawBin,
+			McpConfig:    agentMcpConfig,
 			Task:         taskCtx,
 		}, d.logger)
 	}
@@ -2544,6 +2567,7 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 			Provider:       provider,
 			CodexVersion:   codexVersion,
 			OpenclawBin:    openclawBin,
+			McpConfig:      agentMcpConfig,
 			Task:           taskCtx,
 		}
 		if localAssignment != nil {
@@ -2582,6 +2606,17 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, slot i
 		defer func() {
 			if cerr := execenv.CleanupRuntimeConfig(env.WorkDir, provider); cerr != nil {
 				d.logger.Warn("execenv: cleanup runtime config failed (non-fatal)", "error", cerr)
+			}
+			// Excise the sidecar tree (.agent_context/, .multica/,
+			// provider-specific .claude/skills/ etc.) that Prepare wrote
+			// into the user's repo. Without this pass the user's tree
+			// accumulates one directory layer per task — see MUL-2784.
+			// CleanupRuntimeConfig handles the runtime brief inside
+			// CLAUDE.md / AGENTS.md / GEMINI.md; CleanupSidecars handles
+			// every other file Prepare placed under WorkDir. Together
+			// they round-trip the workdir to its exact pre-task bytes.
+			if cerr := execenv.CleanupSidecars(env.RootDir); cerr != nil {
+				d.logger.Warn("execenv: cleanup sidecars failed (non-fatal)", "error", cerr)
 			}
 		}()
 	}
