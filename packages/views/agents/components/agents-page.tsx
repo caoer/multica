@@ -48,18 +48,28 @@ import { CreateAgentDialog } from "./create-agent-dialog";
 import { type AgentRow, createAgentColumns } from "./agent-columns";
 import { useT } from "../../i18n";
 import { matchesPinyin } from "../../editor/extensions/pinyin-match";
+import {
+  buildRuntimeMachines,
+  type RuntimeMachine,
+} from "../../runtimes/components/runtime-machines";
+import { RuntimeMachineFilterDropdown } from "./runtime-machine-filter-dropdown";
 
 // Filter axes:
 //
-//   View         = active vs archived dataset. Archived is low-frequency,
-//                  accessed through a ghost link in the toolbar.
-//   Scope        = ownership lens (All vs Mine). Layer-1 segment.
-//   Availability = "Can the agent take work right now?" — 3-state chip
-//                  group (online / unstable / offline) sourced from
-//                  AgentAvailability. The only chip filter we keep —
-//                  the previous Workload axis was dropped because its
-//                  "queued / failed / cancelled" buckets became
-//                  meaningless once Failed left the workload model.
+//   View           = active vs archived dataset. Archived is low-frequency,
+//                    accessed through a ghost link in the toolbar.
+//   Scope          = ownership lens (All vs Mine). Layer-1 segment.
+//   Runtime machine = "Which host is the agent bound to?" — dropdown
+//                    filter grouped by section (Local / Remote / Cloud).
+//                    Mirrors the machine grouping on the Runtimes page
+//                    so a user can drill from a machine into the agents
+//                    hosted on it.
+//   Availability   = "Can the agent take work right now?" — 3-state chip
+//                    group (online / unstable / offline) sourced from
+//                    AgentAvailability. The only chip filter we keep —
+//                    the previous Workload axis was dropped because its
+//                    "queued / failed / cancelled" buckets became
+//                    meaningless once Failed left the workload model.
 type View = "active" | "archived";
 type Scope = "all" | "mine";
 type AvailabilityFilter = "all" | AgentAvailability;
@@ -107,6 +117,11 @@ export function AgentsPage() {
   const setScope = useAgentsViewStore((s) => s.setScope);
   const [availabilityFilter, setAvailabilityFilter] =
     useState<AvailabilityFilter>("all");
+  // `null` means "all runtimes" (the default). When set, the value is a
+  // RuntimeMachine id from `buildRuntimeMachines` (the same grouping the
+  // Runtimes page uses), so the user can drill from a machine on that
+  // page into the agents bound to it.
+  const [runtimeMachineId, setRuntimeMachineId] = useState<string | null>(null);
   const [sort, setSort] = useState<SortKey>("recent");
   const [search, setSearch] = useState("");
   const [showCreate, setShowCreate] = useState(false);
@@ -185,7 +200,71 @@ export function AgentsPage() {
     return visibleInView.filter((a) => a.owner_id === currentUser.id);
   }, [visibleInView, scope, currentUser, view]);
 
-  // Final cut — availability chip + search.
+  // Build the workspace's runtime machines (local / remote / cloud
+  // groupings) the same way the Runtimes page does, so the filter
+  // dropdown labels match the machines the user sees there. The
+  // `now` clock only affects health rollups — we don't render health
+  // chips in this list, so a stale snapshot is fine; a single derive
+  // per render is cheap and avoids pulling in a 30s tick on a page
+  // that doesn't show health.
+  const machines = useMemo(
+    () => buildRuntimeMachines(runtimes, { now: Date.now() }),
+    [runtimes],
+  );
+
+  // Reverse map: runtime_id → machine id. Lets the filter step look up
+  // an agent's machine in O(1). Built off the machine grouping rather
+  // than `runtimesById` so a runtime's machine identity matches the
+  // dropdown labels (machines dedupe across providers by daemon).
+  const runtimeIdToMachineId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const machine of machines) {
+      for (const r of machine.runtimes) m.set(r.id, machine.id);
+    }
+    return m;
+  }, [machines]);
+
+  // Per-machine agent counts in `inScope` — used both for the chip
+  // badges in the dropdown AND to make the runtime filter respect the
+  // current scope (e.g. "Mine" only shows machines that have one of
+  // my agents). Computed against `inScope` (not `visibleInView`) so the
+  // number next to "All" is exactly `inScope.length`.
+  const agentCountByMachine = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const a of inScope) {
+      const machineId = runtimeIdToMachineId.get(a.runtime_id);
+      if (!machineId) continue;
+      counts.set(machineId, (counts.get(machineId) ?? 0) + 1);
+    }
+    return counts;
+  }, [inScope, runtimeIdToMachineId]);
+
+  // If the selected machine is GC'd while we're on the page (daemon
+  // stopped, runtime deleted), the filter would zero out the list with
+  // no UI to clear it. Bounce back to "all" so the user always sees
+  // something actionable.
+  useEffect(() => {
+    if (
+      runtimeMachineId !== null &&
+      !machines.some((machine) => machine.id === runtimeMachineId)
+    ) {
+      setRuntimeMachineId(null);
+    }
+  }, [runtimeMachineId, machines]);
+
+  // Resolved title for the current machine filter — used by the
+  // no-matches state so the user sees "No agents on `dev.local`" rather
+  // than a bare "No agents match this filter" when the search is empty
+  // but the machine filter is doing the narrowing.
+  const selectedMachine = useMemo(
+    () =>
+      runtimeMachineId === null
+        ? null
+        : machines.find((machine) => machine.id === runtimeMachineId) ?? null,
+    [runtimeMachineId, machines],
+  );
+
+  // Final cut — availability chip + runtime machine + search.
   const filteredAgents = useMemo(() => {
     const q = search.trim().toLowerCase();
     return inScope.filter((a) => {
@@ -194,6 +273,16 @@ export function AgentsPage() {
       if (view === "active" && availabilityFilter !== "all") {
         const detail = presenceMap.get(a.id);
         if (detail?.availability !== availabilityFilter) return false;
+      }
+      // Runtime machine filter only applies to the Active view — the
+      // archived toolbar has no machine dropdown, so an archived agent
+      // would never get selected but might still slip through scope.
+      if (
+        view === "active" &&
+        runtimeMachineId !== null &&
+        runtimeIdToMachineId.get(a.runtime_id) !== runtimeMachineId
+      ) {
+        return false;
       }
       if (q) {
         if (
@@ -206,7 +295,15 @@ export function AgentsPage() {
       }
       return true;
     });
-  }, [inScope, view, availabilityFilter, presenceMap, search]);
+  }, [
+    inScope,
+    view,
+    availabilityFilter,
+    presenceMap,
+    runtimeMachineId,
+    runtimeIdToMachineId,
+    search,
+  ]);
 
   // Per-availability counts for the chip badges. Computed against
   // `inScope` (ignoring the availability filter itself) so the numbers
@@ -421,6 +518,10 @@ export function AgentsPage() {
                   totalCount={inScope.length}
                   archivedCount={archivedCount}
                   onShowArchived={() => setView("archived")}
+                  machines={machines}
+                  runtimeMachineId={runtimeMachineId}
+                  onRuntimeMachineChange={setRuntimeMachineId}
+                  agentCountByMachine={agentCountByMachine}
                 />
                 <AvailabilityFilterRow
                   value={availabilityFilter}
@@ -439,7 +540,12 @@ export function AgentsPage() {
             )}
 
             {sortedAgents.length === 0 ? (
-              <NoMatches view={view} search={search} scope={scope} />
+              <NoMatches
+                view={view}
+                search={search}
+                scope={scope}
+                runtimeMachineTitle={selectedMachine?.title ?? null}
+              />
             ) : (
               <DataTable
                 table={table}
@@ -565,6 +671,10 @@ function ActiveToolbarRow({
   totalCount,
   archivedCount,
   onShowArchived,
+  machines,
+  runtimeMachineId,
+  onRuntimeMachineChange,
+  agentCountByMachine,
 }: {
   scope: Scope;
   setScope: (v: Scope) => void;
@@ -577,6 +687,10 @@ function ActiveToolbarRow({
   totalCount: number;
   archivedCount: number;
   onShowArchived: () => void;
+  machines: RuntimeMachine[];
+  runtimeMachineId: string | null;
+  onRuntimeMachineChange: (id: string | null) => void;
+  agentCountByMachine: Map<string, number>;
 }) {
   const { t } = useT("agents");
   return (
@@ -592,6 +706,12 @@ function ActiveToolbarRow({
       </div>
       <ScopeSegment scope={scope} setScope={setScope} counts={scopeCounts} />
       <div className="ml-auto flex items-center gap-3">
+        <RuntimeMachineFilterDropdown
+          machines={machines}
+          value={runtimeMachineId}
+          onChange={onRuntimeMachineChange}
+          agentCountByMachine={agentCountByMachine}
+        />
         {archivedCount > 0 && (
           <button
             type="button"
@@ -849,24 +969,36 @@ function NoMatches({
   view,
   search,
   scope,
+  runtimeMachineTitle,
 }: {
   view: View;
   search: string;
   scope: Scope;
+  runtimeMachineTitle: string | null;
 }) {
   const { t } = useT("agents");
   const hasSearch = search.length > 0;
   const hasFilter = scope === "mine";
+  const hasRuntimeFilter = runtimeMachineTitle !== null;
 
   let body: string;
   if (view === "archived") {
     body = hasSearch
       ? t(($) => $.no_matches.search_archived, { query: search })
       : t(($) => $.no_matches.no_archived);
+  } else if (hasSearch && hasRuntimeFilter) {
+    body = t(($) => $.no_matches.search_runtime_filtered, {
+      query: search,
+      machine: runtimeMachineTitle,
+    });
   } else if (hasSearch) {
     body = hasFilter
       ? t(($) => $.no_matches.search_active_filtered, { query: search })
       : t(($) => $.no_matches.search_active, { query: search });
+  } else if (hasRuntimeFilter) {
+    body = t(($) => $.no_matches.runtime_filtered, {
+      machine: runtimeMachineTitle,
+    });
   } else {
     body = t(($) => $.no_matches.no_filter_match);
   }
