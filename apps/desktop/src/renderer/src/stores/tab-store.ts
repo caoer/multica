@@ -86,6 +86,8 @@ interface TabStore {
   updateTab: (tabId: string, patch: Partial<Pick<Tab, "path" | "title" | "icon">>) => void;
   /** Patch history tracking of a tab. Finds across groups. */
   updateTabHistory: (tabId: string, historyIndex: number, historyLength: number) => void;
+  /** Recreate the active tab's router at the same path after a route-level crash. */
+  reloadActiveTab: () => void;
   /**
    * Reorder within the active workspace's group only. Clamped so a tab can
    * never cross the pinned / unpinned boundary — a drag that would move a
@@ -473,6 +475,30 @@ export const useTabStore = create<TabStore>()(
             [slug]: { ...group, tabs: nextTabs },
           },
         });
+      },
+
+      reloadActiveTab() {
+        const { activeWorkspaceSlug, byWorkspace } = get();
+        if (!activeWorkspaceSlug) return;
+        const group = byWorkspace[activeWorkspaceSlug];
+        if (!group) return;
+        const index = group.tabs.findIndex((t) => t.id === group.activeTabId);
+        if (index < 0) return;
+        const current = group.tabs[index];
+        const nextTabs = [...group.tabs];
+        nextTabs[index] = {
+          ...current,
+          router: createTabRouter(current.path),
+          historyIndex: 0,
+          historyLength: 1,
+        };
+        set({
+          byWorkspace: {
+            ...byWorkspace,
+            [activeWorkspaceSlug]: { ...group, tabs: nextTabs },
+          },
+        });
+        window.setTimeout(() => current.router.dispose(), 0);
       },
 
       moveTab(fromIndex, toIndex) {
