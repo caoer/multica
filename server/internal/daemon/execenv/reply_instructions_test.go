@@ -244,3 +244,65 @@ func TestInjectRuntimeConfigWindowsCommentTriggerHasNoStdin(t *testing.T) {
 		})
 	}
 }
+
+// TestInjectRuntimeConfigWindowsAssignmentBriefStaysFileOnly pins the PR #3654
+// review fix: on Windows, the ASSIGNMENT-triggered brief must never *recommend*
+// `--content-stdin`. Unlike the comment-trigger path, the assignment workflow
+// has no BuildCommentReplyInstructions override, so an agent that follows the
+// "post your final results" step literally would pipe its final comment through
+// PowerShell and drop non-ASCII bytes (#2198 / #2236 / #2376). The OS-aware
+// ## Comment Formatting section (file-only on Windows) is the single source of
+// truth; the Available Commands entry and step 6 must defer to it, not re-offer
+// stdin. The flag synopsis may still *list* `--content-stdin` as available.
+//
+// Not parallel: mutates the package-level runtimeGOOS.
+func TestInjectRuntimeConfigWindowsAssignmentBriefStaysFileOnly(t *testing.T) {
+	saved := runtimeGOOS
+	t.Cleanup(func() { runtimeGOOS = saved })
+	runtimeGOOS = "windows"
+
+	// Assignment-triggered: IssueID set, no TriggerCommentID.
+	ctx := TaskContextForEnv{IssueID: "issue-1"}
+
+	for _, provider := range []string{"claude", "codex", "opencode"} {
+		t.Run(provider, func(t *testing.T) {
+			dir := t.TempDir()
+			if _, err := InjectRuntimeConfig(dir, provider, ctx); err != nil {
+				t.Fatalf("InjectRuntimeConfig failed: %v", err)
+			}
+			fileName := "CLAUDE.md"
+			if provider != "claude" {
+				fileName = "AGENTS.md"
+			}
+			data, err := os.ReadFile(filepath.Join(dir, fileName))
+			if err != nil {
+				t.Fatalf("read %s: %v", fileName, err)
+			}
+			s := string(data)
+
+			// The Windows Comment Formatting section is file-only.
+			for _, want := range []string{
+				"## Comment Formatting",
+				"On Windows, **always write the comment body to a UTF-8 file",
+				"do NOT pipe via `--content-stdin`",
+			} {
+				if !strings.Contains(s, want) {
+					t.Errorf("%s missing Windows file-only guidance %q\n---\n%s", fileName, want, s)
+				}
+			}
+
+			// No prose may RECOMMEND stdin on Windows. The flag synopsis may
+			// still list `--content-stdin`; only the prescriptive "file or
+			// stdin" phrasings are banned.
+			for _, banned := range []string{
+				"or `--content-stdin`",
+				"using `--content-file` or `--content-stdin`",
+				"use `--content-file <path>` or `--content-stdin`",
+			} {
+				if strings.Contains(s, banned) {
+					t.Errorf("%s recommends stdin on Windows: %q\n---\n%s", fileName, banned, s)
+				}
+			}
+		})
+	}
+}
