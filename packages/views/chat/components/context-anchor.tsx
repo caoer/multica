@@ -90,7 +90,7 @@ export function ContextAnchorButton() {
 
   const { data: recentContexts = [] } = useQuery({
     queryKey: ["chat", "recent-contexts", wsId, recentContextRefs],
-    enabled: recentContextRefs.length > 0,
+    enabled: open && recentContextRefs.length > 0,
     queryFn: async () => {
       const resolved: Array<ContextAnchor | null> = await Promise.all(recentContextRefs.map(async (entry) => {
         try {
@@ -110,7 +110,7 @@ export function ContextAnchorButton() {
 
   const { data: searchResults = [], isLoading: searching } = useQuery({
     queryKey: ["chat", "context-search", wsId, trimmedQuery],
-    enabled: trimmedQuery.length >= 2,
+    enabled: open && trimmedQuery.length >= 2,
     queryFn: async ({ signal }) => {
       const [issues, projects] = await Promise.all([
         api.searchIssues({ q: trimmedQuery, limit: 8, include_closed: true, signal }),

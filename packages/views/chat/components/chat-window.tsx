@@ -42,7 +42,7 @@ import {
   useMarkChatSessionRead,
   useUpdateChatSession,
 } from "@multica/core/chat/mutations";
-import { useChatStore } from "@multica/core/chat";
+import { useChatStore, type ContextAnchor } from "@multica/core/chat";
 import { ChatMessageList, ChatMessageSkeleton } from "./chat-message-list";
 import { ChatInput } from "./chat-input";
 import {
@@ -59,6 +59,12 @@ import { useT } from "../../i18n";
 const uiLogger = createLogger("chat.ui");
 const apiLogger = createLogger("chat.api");
 const CHAT_VIRTUOSO_INITIAL_FIRST_ITEM_INDEX = 1_000_000;
+
+export function buildOutgoingChatContent(content: string, selectedContext: ContextAnchor | null): string {
+  return selectedContext
+    ? `${buildAnchorMarkdown(selectedContext)}\n\n${content}`
+    : content;
+}
 
 function seedChatMessagesPageCache(
   qc: ReturnType<typeof useQueryClient>,
@@ -290,9 +296,7 @@ export function ChatWindow() {
         return;
       }
 
-      const finalContent = selectedContext
-        ? `${buildAnchorMarkdown(selectedContext)}\n\n${content}`
-        : content;
+      const finalContent = buildOutgoingChatContent(content, selectedContext);
 
       const isNewSession = !activeSessionId;
 

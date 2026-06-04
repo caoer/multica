@@ -14,8 +14,6 @@ export const DRAFT_NEW_SESSION = "__new__";
 const CHAT_WIDTH_KEY = "multica:chat:width";
 const CHAT_HEIGHT_KEY = "multica:chat:height";
 const CHAT_EXPANDED_KEY = "multica:chat:expanded";
-/** Focus mode is a personal preference — global across workspaces/sessions. */
-const FOCUS_MODE_KEY = "multica:chat:focusMode";
 const SELECTED_CONTEXT_KEY = "multica:chat:selectedContext";
 /**
  * Open/closed preference, persisted globally (not per-workspace) — most users
@@ -115,11 +113,9 @@ export interface ChatState {
   /** Drafts per session: sessionId (or DRAFT_NEW_SESSION) → markdown text. */
   inputDrafts: Record<string, string>;
   /**
-   * When on, the chat tracks whatever issue/project/inbox-item the user is
-   * looking at and prepends it to outgoing messages. Persisted globally so
-   * the preference survives workspace switches and reloads.
+   * Explicitly selected send context. Persisted per workspace, shared across
+   * chat sessions in that workspace, and intentionally not cleared after send.
    */
-  focusMode: boolean;
   selectedContext: ContextAnchor | null;
   /** Raw user-chosen size — no clamp applied. UI layer clamps at render time. */
   chatWidth: number;
@@ -132,7 +128,6 @@ export interface ChatState {
   /** sessionId accepts a real session UUID or DRAFT_NEW_SESSION. */
   setInputDraft: (sessionId: string, draft: string) => void;
   clearInputDraft: (sessionId: string) => void;
-  setFocusMode: (on: boolean) => void;
   setSelectedContext: (context: ContextAnchor | null) => void;
   /** Persist raw size and auto-exit expanded mode. */
   setChatSize: (width: number, height: number) => void;
@@ -162,7 +157,6 @@ export function createChatStore(options: ChatStoreOptions) {
     activeSessionId: storage.getItem(wsKey(SESSION_STORAGE_KEY)),
     selectedAgentId: storage.getItem(wsKey(AGENT_STORAGE_KEY)),
     inputDrafts: readDrafts(storage, wsKey(DRAFTS_KEY)),
-    focusMode: storage.getItem(FOCUS_MODE_KEY) === "true",
     selectedContext: readSelectedContext(storage, wsKey(SELECTED_CONTEXT_KEY)),
     chatWidth: Number(storage.getItem(CHAT_WIDTH_KEY)) || CHAT_DEFAULT_W,
     chatHeight: Number(storage.getItem(CHAT_HEIGHT_KEY)) || CHAT_DEFAULT_H,
@@ -198,12 +192,6 @@ export function createChatStore(options: ChatStoreOptions) {
       const next = { ...get().inputDrafts, [sessionId]: draft };
       writeDrafts(storage, wsKey(DRAFTS_KEY), next);
       set({ inputDrafts: next });
-    },
-    setFocusMode: (on) => {
-      logger.info("setFocusMode", { to: on });
-      if (on) storage.setItem(FOCUS_MODE_KEY, "true");
-      else storage.removeItem(FOCUS_MODE_KEY);
-      set({ focusMode: on });
     },
     setSelectedContext: (context) => {
       logger.info("setSelectedContext", { context });
