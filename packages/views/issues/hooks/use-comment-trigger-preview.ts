@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { api } from "@multica/core/api";
 import type { CommentTriggerPreviewAgent } from "@multica/core/types";
 
@@ -32,6 +33,25 @@ export function commentTriggerPreviewSignature(content: string): string {
   return `nonempty|${tokens.join(",")}`;
 }
 
+function useDebouncedSignature(signature: string) {
+  const [debouncedSignature, setDebouncedSignature] = useState("empty");
+
+  useEffect(() => {
+    if (signature === "empty") {
+      setDebouncedSignature("empty");
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      setDebouncedSignature(signature);
+    }, COMMENT_TRIGGER_PREVIEW_DEBOUNCE_MS);
+
+    return () => window.clearTimeout(timer);
+  }, [signature]);
+
+  return debouncedSignature;
+}
+
 export function useCommentTriggerPreview({
   issueId,
   parentId,
@@ -42,53 +62,33 @@ export function useCommentTriggerPreview({
   content: string;
 }): UseCommentTriggerPreviewResult {
   const signature = useMemo(() => commentTriggerPreviewSignature(content), [content]);
-  const cacheRef = useRef(new Map<string, CommentTriggerPreviewAgent[]>());
+  const debouncedSignature = useDebouncedSignature(signature);
   const contentRef = useRef(content);
-  const requestIdRef = useRef(0);
-  const [agents, setAgents] = useState<CommentTriggerPreviewAgent[]>([]);
-  const [status, setStatus] = useState<CommentTriggerPreviewStatus>("idle");
 
   useEffect(() => {
     contentRef.current = content;
   }, [content]);
 
-  useEffect(() => {
-    const cacheKey = `${issueId}:${parentId ?? ""}:${signature}`;
-    requestIdRef.current += 1;
-    const requestId = requestIdRef.current;
+  const previewQuery = useQuery({
+    queryKey: ["issues", "comment-trigger-preview", issueId, parentId ?? "", debouncedSignature],
+    queryFn: () => api.previewCommentTriggers(issueId, contentRef.current, parentId),
+    enabled: debouncedSignature !== "empty",
+    retry: false,
+    staleTime: Infinity,
+  });
 
-    if (signature === "empty") {
-      setAgents([]);
-      setStatus("idle");
-      return;
-    }
+  if (debouncedSignature === "empty") {
+    return { agents: [], status: "idle" };
+  }
 
-    const cached = cacheRef.current.get(cacheKey);
-    if (cached) {
-      setAgents(cached);
-      setStatus("idle");
-      return;
-    }
+  const status: CommentTriggerPreviewStatus = previewQuery.isError
+    ? "error"
+    : previewQuery.isFetching
+      ? "loading"
+      : "idle";
 
-    setStatus("loading");
-    const timer = window.setTimeout(() => {
-      api.previewCommentTriggers(issueId, contentRef.current, parentId)
-        .then((preview) => {
-          if (requestIdRef.current !== requestId) return;
-          const nextAgents = preview.agents ?? [];
-          cacheRef.current.set(cacheKey, nextAgents);
-          setAgents(nextAgents);
-          setStatus("idle");
-        })
-        .catch(() => {
-          if (requestIdRef.current !== requestId) return;
-          setAgents([]);
-          setStatus("error");
-        });
-    }, COMMENT_TRIGGER_PREVIEW_DEBOUNCE_MS);
-
-    return () => window.clearTimeout(timer);
-  }, [issueId, parentId, signature]);
-
-  return { agents, status };
+  return {
+    agents: previewQuery.data?.agents ?? [],
+    status,
+  };
 }
