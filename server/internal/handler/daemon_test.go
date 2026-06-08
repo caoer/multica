@@ -2951,6 +2951,68 @@ func TestClaimTask_ChatDeliversAllUnansweredUserMessages(t *testing.T) {
 	}
 }
 
+// TestClaimTask_ChatPopulatesInitiator verifies MUL-2645 for chat tasks: the
+// claim response surfaces the chat session creator as the task initiator
+// (member type + id + name + email). Chat sessions are creator-only, so the
+// creator is the person behind every message in the session.
+func TestClaimTask_ChatPopulatesInitiator(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	agentID, runtimeID, daemonID := createRuntimeGuardAgent(t, ctx)
+
+	var sessionID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title)
+		VALUES ($1, $2, $3, 'initiator chat')
+		RETURNING id
+	`, testWorkspaceID, agentID, testUserID).Scan(&sessionID); err != nil {
+		t.Fatalf("setup: create chat session: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(ctx, `DELETE FROM chat_session WHERE id = $1`, sessionID) })
+
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO chat_message (chat_session_id, role, content) VALUES ($1, 'user', 'hi there')
+	`, sessionID); err != nil {
+		t.Fatalf("setup: insert user message: %v", err)
+	}
+	if _, err := testPool.Exec(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, chat_session_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', 2)
+	`, agentID, runtimeID, sessionID); err != nil {
+		t.Fatalf("setup: create chat task: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/tasks/claim", nil, testWorkspaceID, daemonID)
+	req = withURLParam(req, "runtimeId", runtimeID)
+	testHandler.ClaimTaskByRuntime(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ClaimTaskByRuntime: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Task *struct {
+			InitiatorType  string `json:"initiator_type"`
+			InitiatorID    string `json:"initiator_id"`
+			InitiatorName  string `json:"initiator_name"`
+			InitiatorEmail string `json:"initiator_email"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode claim response: %v", err)
+	}
+	if resp.Task == nil {
+		t.Fatalf("expected a claimed task, got %s", w.Body.String())
+	}
+	if resp.Task.InitiatorType != "member" || resp.Task.InitiatorID != testUserID ||
+		resp.Task.InitiatorName != handlerTestName || resp.Task.InitiatorEmail != handlerTestEmail {
+		t.Errorf("chat initiator = {type:%q id:%q name:%q email:%q}, want {member %q %q %q}",
+			resp.Task.InitiatorType, resp.Task.InitiatorID, resp.Task.InitiatorName, resp.Task.InitiatorEmail,
+			testUserID, handlerTestName, handlerTestEmail)
+	}
+}
+
 func TestClaimTask_QuickCreatePopulatesThreadName(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
@@ -3685,6 +3747,56 @@ func TestClaimTaskByRuntime_CommentTaskPopulatesNewCommentCount(t *testing.T) {
 	// both count; only the agent's own reply and the injected trigger are excluded.
 	if resp.Task.NewCommentCount != 2 {
 		t.Errorf("new_comment_count = %d, want 2 (issue-wide: same-thread + unrelated thread)", resp.Task.NewCommentCount)
+	}
+}
+
+// TestClaimTaskByRuntime_CommentTaskPopulatesInitiator verifies MUL-2645: the
+// claim response surfaces the triggering comment's member author as the task
+// initiator (type + id + name + email), so a workspace-visible agent learns who
+// actually asked rather than seeing the runtime owner. createCommentTriggeredClaimTask
+// authors the trigger comment as the fixture member (testUserID).
+func TestClaimTaskByRuntime_CommentTaskPopulatesInitiator(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+	runtimeID := createClaimReclaimRuntime(t, ctx, "Comment initiator runtime")
+	agentID, issueID := createClaimReclaimAgentAndIssue(t, ctx, runtimeID, "Comment initiator agent")
+	taskID, _ := createCommentTriggeredClaimTask(t, ctx, agentID, runtimeID, issueID, nil)
+
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequest("POST", "/api/daemon/runtimes/"+runtimeID+"/tasks/claim", nil, testWorkspaceID, "comment-initiator-claim")
+	req = withURLParam(req, "runtimeId", runtimeID)
+	testHandler.ClaimTaskByRuntime(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("ClaimTaskByRuntime: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Task *struct {
+			ID             string `json:"id"`
+			InitiatorType  string `json:"initiator_type"`
+			InitiatorID    string `json:"initiator_id"`
+			InitiatorName  string `json:"initiator_name"`
+			InitiatorEmail string `json:"initiator_email"`
+		} `json:"task"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode claim response: %v", err)
+	}
+	if resp.Task == nil || resp.Task.ID != taskID {
+		t.Fatalf("expected claimed task %s, got %s", taskID, w.Body.String())
+	}
+	if resp.Task.InitiatorType != "member" {
+		t.Errorf("initiator_type = %q, want %q", resp.Task.InitiatorType, "member")
+	}
+	if resp.Task.InitiatorID != testUserID {
+		t.Errorf("initiator_id = %q, want %q", resp.Task.InitiatorID, testUserID)
+	}
+	if resp.Task.InitiatorName != handlerTestName {
+		t.Errorf("initiator_name = %q, want %q", resp.Task.InitiatorName, handlerTestName)
+	}
+	if resp.Task.InitiatorEmail != handlerTestEmail {
+		t.Errorf("initiator_email = %q, want %q", resp.Task.InitiatorEmail, handlerTestEmail)
 	}
 }
 

@@ -1263,11 +1263,22 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 					resp.TriggerThreadID = uuidToString(comment.ParentID)
 				}
 				resp.TriggerAuthorType = comment.AuthorType
+				// The triggering comment's author is the task initiator — the
+				// real requester behind this run. Surface it (type + id + name,
+				// plus email for members) so a workspace-visible agent can
+				// attribute the request to the right person instead of to the
+				// runtime owner. Same lookups as the display name above; we just
+				// also capture the id and email. See MUL-2645.
+				resp.InitiatorType = comment.AuthorType
+				if comment.AuthorID.Valid {
+					resp.InitiatorID = uuidToString(comment.AuthorID)
+				}
 				switch comment.AuthorType {
 				case "agent":
 					if comment.AuthorID.Valid {
 						if a, err := h.Queries.GetAgent(r.Context(), comment.AuthorID); err == nil {
 							resp.TriggerAuthorName = a.Name
+							resp.InitiatorName = a.Name
 						}
 					}
 				case "member":
@@ -1276,6 +1287,8 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 					if comment.AuthorID.Valid {
 						if u, err := h.Queries.GetUser(r.Context(), comment.AuthorID); err == nil {
 							resp.TriggerAuthorName = u.Name
+							resp.InitiatorName = u.Name
+							resp.InitiatorEmail = u.Email
 						}
 					}
 				}
@@ -1340,6 +1353,19 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 			resp.WorkspaceID = uuidToString(cs.WorkspaceID)
 			resp.ChatSessionID = uuidToString(cs.ID)
 			resp.ThreadName = cs.Title
+			// The chat session creator is the task initiator — chat sessions
+			// are creator-only (SendChatMessage rejects non-creators), so the
+			// person behind every message in this session is the creator.
+			// Surface their identity so a workspace-visible agent answers the
+			// right person rather than the runtime owner. See MUL-2645.
+			if cs.CreatorID.Valid {
+				resp.InitiatorType = "member"
+				resp.InitiatorID = uuidToString(cs.CreatorID)
+				if u, err := h.Queries.GetUser(r.Context(), cs.CreatorID); err == nil {
+					resp.InitiatorName = u.Name
+					resp.InitiatorEmail = u.Email
+				}
+			}
 			if ws, err := h.Queries.GetWorkspace(r.Context(), cs.WorkspaceID); err == nil && ws.Repos != nil {
 				var repos []RepoData
 				if json.Unmarshal(ws.Repos, &repos) == nil && len(repos) > 0 {
