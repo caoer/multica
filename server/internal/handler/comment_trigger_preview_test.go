@@ -161,6 +161,22 @@ func TestPreviewCommentTriggers_NoteReturnsNoAgents(t *testing.T) {
 	}
 }
 
+func TestCreateComment_NoteMentionDoesNotQueueAgent(t *testing.T) {
+	if testHandler == nil || testPool == nil {
+		t.Skip("database not available")
+	}
+
+	agentID := createHandlerTestAgent(t, "Create Note Agent", nil)
+	issueID := createCommentTriggerPreviewIssue(t, "comment trigger create note", "agent", agentID)
+	content := fmt.Sprintf("/note [@Agent](mention://agent/%s) human-only context", agentID)
+
+	postCommentForTriggerPreviewTest(t, issueID, map[string]any{"content": content})
+
+	if got := countQueuedCommentTriggerTasks(t, issueID, agentID); got != 0 {
+		t.Fatalf("note create queued tasks = %d, want 0", got)
+	}
+}
+
 func TestPreviewCommentTriggers_AssigneeAndSuppress(t *testing.T) {
 	if testHandler == nil || testPool == nil {
 		t.Skip("database not available")
