@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
 import { toast } from "sonner";
-import type { Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "@multica/core/types";
+import type { Issue, IssueStatus, IssuePriority, IssueAssigneeType, Attachment } from "@multica/core/types";
 import { contentReferencesAttachment } from "@multica/core/types";
 import {
   DialogContent,
@@ -57,6 +57,17 @@ import { FileUploadButton } from "@multica/ui/components/common/file-upload-butt
 import { PillButton } from "../common/pill-button";
 import { IssuePickerModal } from "./issue-picker-modal";
 import { useT } from "../i18n";
+
+function toDraftAttachment(attachment: Attachment): Attachment {
+  return {
+    ...attachment,
+    // `download_url` is minted for the current API response and may be a
+    // short-lived signed URL. Drafts survive across dialog closes and app
+    // restarts, so persist only durable fields and let render/download paths
+    // re-resolve through id/markdown_url when needed.
+    download_url: "",
+  };
+}
 
 // ---------------------------------------------------------------------------
 // ManualCreatePanel — manual-mode body of the create-issue dialog. Renders
@@ -156,7 +167,7 @@ export function ManualCreatePanel({
         useIssueDraftStore.getState().draft.attachments ?? [];
       const attachments = currentAttachments.some((a) => a.id === result.id)
         ? currentAttachments
-        : [...currentAttachments, result];
+        : [...currentAttachments, toDraftAttachment(result)];
       setDraft({ attachments });
     }
     return result;

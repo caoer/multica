@@ -490,10 +490,17 @@ describe("CreateIssueModal", () => {
           expect.objectContaining({
             id: "11111111-2222-3333-4444-555555555555",
             filename: "shot.png",
+            download_url: "",
           }),
         ],
       });
     });
+    const draftAttachmentsCall = mockSetDraft.mock.calls.find(
+      ([patch]) => Array.isArray(patch.attachments),
+    )?.[0] as { attachments?: Array<{ download_url: string }> } | undefined;
+    expect(draftAttachmentsCall?.attachments?.[0]?.download_url).not.toContain(
+      "Signature=",
+    );
   });
 
   it("reuses draft attachments after reopening manual create so pasted images can render and bind", async () => {
@@ -509,7 +516,7 @@ describe("CreateIssueModal", () => {
       uploader_id: "user-1",
       filename: "shot.png",
       url: "https://cdn.example.test/shot.png",
-      download_url: "https://cdn.example.test/shot.png?Signature=fresh",
+      download_url: "",
       markdown_url: "https://multica-api.copilothub.ai/api/attachments/11111111-2222-3333-4444-555555555555/download",
       content_type: "image/png",
       size_bytes: 123,
